@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta, timezone
-
+import os
 import bcrypt
 from jose import JWTError, jwt
 from fastapi import Depends, HTTPException, status
@@ -10,7 +10,7 @@ from database import SessionLocal
 from models import User
 
 
-SECRET_KEY = "expense-manager-secret-key-change-later"
+SECRET_KEY = os.getenv("SECRET_KEY")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
 
