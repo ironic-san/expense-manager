@@ -1,0 +1,9 @@
+fastapi==0.141.1
+uvicorn==0.52.0
+SQLAlchemy==2.0.52
+psycopg2-binary==2.9.12
+python-dotenv==1.2.3
+python-jose==3.5.0
+bcrypt==5.0.0
+email-validator==2.3.0
+cryptography==50.0.1
