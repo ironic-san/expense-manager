@@ -7,6 +7,8 @@ from sqlalchemy.orm import Session
 from database import SessionLocal
 from models import User, Expense
 
+from fastapi.middleware.cors import CORSMiddleware
+
 from schemas import (
     RegisterRequest,
     LoginRequest,
@@ -38,6 +40,13 @@ app = FastAPI(
     title="Cloud Expense Management System",
     description="Cloud-based expense management system with AI analysis",
     version="1.0.0",
+)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
