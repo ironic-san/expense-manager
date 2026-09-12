@@ -18,6 +18,8 @@ from schemas import (
     ExpenseCreate,
     ExpenseUpdate,
     ExpenseResponse,
+    UserUpdateRequest,
+    PasswordUpdateRequest,
 )
 
 from auth import (
@@ -41,6 +43,8 @@ app = FastAPI(
     description="Cloud-based expense management system with AI analysis",
     version="1.0.0",
 )
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173"],
@@ -116,6 +120,10 @@ def register(
     return new_user
 
 
+# ============================================================
+# LOGIN
+# ============================================================
+
 @app.post(
     "/auth/login",
     response_model=TokenResponse
@@ -170,6 +178,156 @@ def get_my_profile(
 ):
 
     return current_user
+
+
+# ============================================================
+# UPDATE CURRENT USER PROFILE
+# ============================================================
+
+@app.put(
+    "/users/me",
+    response_model=UserResponse
+)
+def update_my_profile(
+    request: UserUpdateRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+
+    # --------------------------------------------------------
+    # Get the user again using THIS endpoint's DB session.
+    # --------------------------------------------------------
+
+    user = db.query(User).filter(
+        User.user_id == current_user.user_id
+    ).first()
+
+    if user is None:
+
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+
+    # --------------------------------------------------------
+    # Check email uniqueness
+    # --------------------------------------------------------
+
+    existing_user = db.query(User).filter(
+        User.email == request.email,
+        User.user_id != user.user_id
+    ).first()
+
+    if existing_user:
+
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email already registered"
+        )
+
+    # --------------------------------------------------------
+    # Update editable profile fields
+    # --------------------------------------------------------
+
+    user.name = request.name
+    user.email = request.email
+    user.salary = request.salary
+
+    # --------------------------------------------------------
+    # IMPORTANT:
+    # Role is intentionally NOT updated.
+    # --------------------------------------------------------
+
+    db.commit()
+
+    # Refresh the object belonging to THIS session.
+    db.refresh(user)
+
+    return user
+
+
+# ============================================================
+# CHANGE CURRENT USER PASSWORD
+# ============================================================
+
+@app.put(
+    "/users/me/password"
+)
+def update_my_password(
+    request: PasswordUpdateRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+
+    # --------------------------------------------------------
+    # Get the latest user record in THIS DB session
+    # --------------------------------------------------------
+
+    user = db.query(User).filter(
+        User.user_id == current_user.user_id
+    ).first()
+
+    if user is None:
+
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+
+    # --------------------------------------------------------
+    # Verify current password
+    # --------------------------------------------------------
+
+    if not verify_password(
+        request.current_password,
+        user.password
+    ):
+
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Current password is incorrect"
+        )
+
+    # --------------------------------------------------------
+    # Generate a new bcrypt hash
+    # --------------------------------------------------------
+
+    new_hashed_password = hash_password(
+        request.new_password
+    )
+
+    # --------------------------------------------------------
+    # Update password
+    # --------------------------------------------------------
+
+    user.password = new_hashed_password
+
+    # Force SQLAlchemy to send the update
+    db.flush()
+
+    # Permanently save the change
+    db.commit()
+
+    # Reload from database
+    db.refresh(user)
+
+    # --------------------------------------------------------
+    # Verify that the new password was actually persisted
+    # --------------------------------------------------------
+
+    if not verify_password(
+        request.new_password,
+        user.password
+    ):
+
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Password update failed"
+        )
+
+    return {
+        "message": "Password updated successfully"
+    }
 
 
 # ============================================================
@@ -317,9 +475,6 @@ def create_expense(
 
     # ========================================================
     # CURRENT MONTH EXPENSES
-    #
-    # Only expenses that have actually happened
-    # (expense_date <= today)
     # ========================================================
 
     current_month_expenses = [
@@ -335,10 +490,6 @@ def create_expense(
 
     # ========================================================
     # FUTURE EXPENSES
-    #
-    # Future-dated expenses are ALLOWED.
-    # They are NOT counted as money already spent.
-    # They are sent separately to AI as planned expenses.
     # ========================================================
 
     future_expenses = [
@@ -363,7 +514,6 @@ def create_expense(
     remaining_balance = (
         current_user.salary - total_spent
     )
-
 
     days_remaining = calculate_days_remaining(today)
 
@@ -401,10 +551,6 @@ def create_expense(
 
     # --------------------------------------------------------
     # Previous expenses
-    #
-    # Only expenses before the new expense date.
-    # This prevents the newly-created expense from appearing
-    # as a previous expense.
     # --------------------------------------------------------
 
     previous_expenses = [
@@ -419,8 +565,6 @@ def create_expense(
 
     # --------------------------------------------------------
     # Related expenses
-    #
-    # Same category and before the new expense date.
     # --------------------------------------------------------
 
     related_expenses = [
@@ -560,6 +704,7 @@ def create_expense(
             for expense in previous_expenses
         ],
 
+
         # ----------------------------------------------------
         # Related expenses
         # ----------------------------------------------------
@@ -594,6 +739,7 @@ def create_expense(
                 for expense in related_expenses
             ]
         },
+
 
         # ====================================================
         # FUTURE / PLANNED EXPENSES
@@ -656,9 +802,6 @@ def create_expense(
             "AI analysis failed:",
             str(e)
         )
-
-        # IMPORTANT:
-        # Expense remains saved even if AI fails.
 
 
     # ========================================================
@@ -859,12 +1002,10 @@ def overall_ai_analysis(
 
     # ========================================================
     # CATEGORY TOTALS
-    #
-    # Only already-incurred expenses are included in
-    # current spending category analysis.
     # ========================================================
 
     category_totals = {}
+
 
     for expense in current_month_expenses:
 
@@ -919,6 +1060,7 @@ def overall_ai_analysis(
             }
         },
 
+
         # ====================================================
         # FUTURE EXPENSES
         # ====================================================
@@ -959,6 +1101,7 @@ def overall_ai_analysis(
                 for expense in future_expenses
             ]
         },
+
 
         # ====================================================
         # ALL PREVIOUSLY INCURRED EXPENSES
