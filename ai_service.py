@@ -2,6 +2,7 @@ import os
 import json
 import urllib.request
 import urllib.error
+import re
 
 from dotenv import load_dotenv
 
@@ -85,9 +86,8 @@ If the backend-calculated remaining_balance is zero or negative:
 7. Use wording such as "increases the existing budget shortfall",
    "further increases the deficit", or "results in a larger projected deficit".
 8. Do not invent or independently calculate a deficit amount.
-9. A negative remaining balance is a valid financial condition and should
-   be reported clearly rather than treated as an error.
-
+9. A negative remaining balance is a valid financial condition and should be
+   reported clearly rather than treated as an error.
 
 FUTURE EXPENSE RULE:
 
@@ -166,68 +166,66 @@ Keep the response concise.
 # ============================================================
 
 def extract_json(text: str):
+    """Extract the first complete JSON object from an AI response.
+
+    The model is instructed to return JSON only, but free-form model output
+    can occasionally contain Markdown fences or a short sentence before/after
+    the object. This parser accepts those harmless variations while still
+    requiring the final value to be a real JSON object.
+    """
+
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("AI returned an empty response.")
 
     text = text.strip()
 
-    # --------------------------------------------------------
-    # 1. Direct JSON
-    # --------------------------------------------------------
-
+    # 1. Direct JSON.
     try:
-        return json.loads(text)
-
+        value = json.loads(text)
+        if isinstance(value, dict):
+            return value
     except json.JSONDecodeError:
         pass
 
-
-    # --------------------------------------------------------
-    # 2. Remove Markdown code fences
-    # --------------------------------------------------------
-
-    cleaned = (
-        text
-        .replace("```json", "")
-        .replace("```JSON", "")
-        .replace("```", "")
-        .strip()
-    )
+    # 2. Remove Markdown code fences.
+    cleaned = re.sub(r"^\s*```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s*```\s*$", "", cleaned).strip()
 
     try:
-        return json.loads(cleaned)
-
+        value = json.loads(cleaned)
+        if isinstance(value, dict):
+            return value
     except json.JSONDecodeError:
         pass
 
+    # 3. Find a complete JSON object inside additional text.
+    # json.JSONDecoder().raw_decode() is safer than using rfind("}") because
+    # it stops exactly at the end of the first valid JSON object.
+    decoder = json.JSONDecoder()
 
-    # --------------------------------------------------------
-    # 3. Find JSON object inside additional text
-    # --------------------------------------------------------
-
-    start = cleaned.find("{")
-    end = cleaned.rfind("}")
-
-    if start != -1 and end != -1 and end > start:
-
-        candidate = cleaned[start:end + 1]
-
+    for start in (m.start() for m in re.finditer(r"\{", cleaned)):
         try:
-            return json.loads(candidate)
-
+            value, _ = decoder.raw_decode(cleaned[start:])
+            if isinstance(value, dict):
+                return value
         except json.JSONDecodeError:
-            pass
+            continue
 
+    # 4. Handle a common harmless model formatting error: trailing commas.
+    repaired = re.sub(r",\s*([}\]])", r"\1", cleaned)
 
-    # --------------------------------------------------------
-    # 4. Show raw response for debugging
-    # --------------------------------------------------------
+    try:
+        value = json.loads(repaired)
+        if isinstance(value, dict):
+            return value
+    except json.JSONDecodeError:
+        pass
 
     print("\n===== RAW NEMOTRON RESPONSE =====")
     print(text)
     print("===== END RAW RESPONSE =====\n")
 
-    raise ValueError(
-        "AI returned a response that was not valid JSON."
-    )
+    raise ValueError("AI returned a response that was not valid JSON.")
 
 
 # ============================================================
@@ -236,20 +234,8 @@ def extract_json(text: str):
 
 def analyze_expenses(financial_data: dict):
 
-    # --------------------------------------------------------
-    # Check API key
-    # --------------------------------------------------------
-
     if not OPENROUTER_API_KEY:
-
-        raise Exception(
-            "OPENROUTER_API_KEY is not configured"
-        )
-
-
-    # --------------------------------------------------------
-    # Build user prompt
-    # --------------------------------------------------------
+        raise Exception("OPENROUTER_API_KEY is not configured")
 
     user_prompt = f"""
 Analyze the following financial data for ONE authenticated user.
@@ -262,11 +248,7 @@ Do not perform alternative calculations.
 
 FINANCIAL DATA:
 
-{json.dumps(
-    financial_data,
-    indent=2,
-    default=str
-)}
+{json.dumps(financial_data, indent=2, default=str)}
 
 Return ONLY the required JSON object.
 
@@ -279,145 +261,61 @@ Do not use Markdown.
 The entire response must be one JSON object.
 """
 
-
-    # ========================================================
-    # OPENROUTER PAYLOAD
-    # ========================================================
-
     payload = {
         "model": MODEL,
-
         "messages": [
-            {
-                "role": "system",
-                "content": SYSTEM_PROMPT
-            },
-            {
-                "role": "user",
-                "content": user_prompt
-            }
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt}
         ],
-
         "temperature": 0.1,
-
         "max_tokens": 700,
-
-        # IMPORTANT:
-        # Disable Nemotron's reasoning output.
-        # Otherwise it may spend the token budget on reasoning
-        # instead of returning the required JSON.
-        "reasoning": {
-            "enabled": False
-        }
+        "reasoning": {"enabled": False}
     }
-
-
-    # --------------------------------------------------------
-    # Convert payload to JSON
-    # --------------------------------------------------------
 
     data = json.dumps(payload).encode("utf-8")
 
-
-    # --------------------------------------------------------
-    # Create HTTP request
-    # --------------------------------------------------------
-
     request = urllib.request.Request(
-
         API_URL,
-
         data=data,
-
         headers={
             "Authorization": f"Bearer {OPENROUTER_API_KEY}",
             "Content-Type": "application/json",
-
             "HTTP-Referer": "http://localhost:8000",
-
             "X-Title": "Cloud Expense Management System"
         },
-
         method="POST"
     )
 
-
-    # ========================================================
-    # SEND REQUEST
-    # ========================================================
-
     try:
-
         print("\n===== SENDING REQUEST TO NEMOTRON =====")
 
-        with urllib.request.urlopen(
-            request,
-            timeout=45
-        ) as response:
-
+        with urllib.request.urlopen(request, timeout=45) as response:
             response_body = response.read().decode("utf-8")
-
             result = json.loads(response_body)
-
 
         print("===== NEMOTRON RESPONSE RECEIVED =====")
 
-
-        # ----------------------------------------------------
-        # Extract assistant response
-        # ----------------------------------------------------
-
         content = result["choices"][0]["message"]["content"]
 
-
-        # ----------------------------------------------------
-        # Parse JSON
-        # ----------------------------------------------------
+        # Some OpenAI-compatible APIs may return content as structured parts.
+        if isinstance(content, list):
+            content = "".join(
+                part.get("text", "")
+                for part in content
+                if isinstance(part, dict)
+            )
 
         return extract_json(content)
 
-
-    # ========================================================
-    # HTTP ERROR
-    # ========================================================
-
     except urllib.error.HTTPError as e:
-
         error_body = e.read().decode("utf-8")
-
-        raise Exception(
-            f"OpenRouter API error {e.code}: {error_body}"
-        )
-
-
-    # ========================================================
-    # CONNECTION ERROR
-    # ========================================================
+        raise Exception(f"OpenRouter API error {e.code}: {error_body}")
 
     except urllib.error.URLError as e:
-
-        raise Exception(
-            f"Could not connect to OpenRouter: {e.reason}"
-        )
-
-
-    # ========================================================
-    # INVALID API RESPONSE
-    # ========================================================
+        raise Exception(f"Could not connect to OpenRouter: {e.reason}")
 
     except (KeyError, IndexError) as e:
-
-        raise Exception(
-            f"Unexpected OpenRouter response: {e}"
-        )
-
-
-    # ========================================================
-    # INVALID AI RESPONSE
-    # ========================================================
+        raise Exception(f"Unexpected OpenRouter response: {e}")
 
     except ValueError as e:
-
-        raise Exception(
-            f"Invalid AI response: {e}"
-        )
+        raise Exception(f"Invalid AI response: {e}")
